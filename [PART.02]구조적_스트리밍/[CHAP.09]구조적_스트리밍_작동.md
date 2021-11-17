@@ -87,3 +87,41 @@
   - `sensorId`를 키로 하여 센서 데이터를 해당 참조와 상관
 - app을 완성하기 위해, 기존 데이터의 `min-max` 범위를 사용하여
   - 센서 판독값의 실젯값을 계산
+
+## 9.3. 스트리밍 싱크에 쓰기
+- 데이터를 `parquet` 형식 파일에 쓰기
+- 구조적 스트리밍에서는 `write`작업이 중요
+- **선언된 변환**이 **스트림**에서 완료되었음을 표시하고,
+  - `write`모드를 정의하며 `start()`를 호출하면, **연속 쿼리 처리**가 시작됨
+- 구조적 스트리밍에서 **모든 작업**은
+  - **스트리밍 데이터**로 수행하려는 작업에 대한 **늦은 선언**
+- `start()`를 호출할때만
+  - 스트림의 **실제 소비**가 시작되고,
+  - 데이터에 대한 **쿼리 작업**이 **실제 결과**로 **구체화**
+- 예시 코드
+  ```scala
+  val knownSensorQuery = knownSensors.writeStream
+      .outputMode("append")
+      .format("parquet")
+      .option("path", targetPath)
+      .option("checkpointLocation", "/tmp/checkpoint")
+      .start()
+  ```
+- 코드 설명
+  - `writeStream`
+    - `fluent`(유연한) 인터페이스를 사용하여
+    - 원하는 **쓰기 작업**에 대한 옵션을 구성할 수 있는 **빌더 객체** 생성
+  - `format`을 사용하여, 결과 다운스트림을 구체화할 싱크를 지정
+    - 이 경우, 내장 `FileStreamSink`와 `parquet` 형식을 사용
+  - `mode`
+    - 구조적 스트리밍에서 새로운 개념
+    - 이론적으로, 스트림에서 볼 수 있는 모든 데이터에 접근할 수 있음을 감안할 때
+    - 해당 데이터의 다른 보기를 생성할 수 있음
+  - `append`
+    - 스트리밍 계산의 영향을 받는 새 레코드가 출력으로 생성됨
+- `start`호출의 결과는 `StreamingQuery` 인스턴스
+- 이 객체는 쿼리의 **실행을 제어**하고 **실행 중인 스트리밍 쿼리의 상태**에 대한 정보를 요청하는 방법 제공
+- `knownSensorsQuery.recentProgress`를 호출한 결과로
+  - `StreamingQueryProgress`를 볼 수 있음
+- `numInputRows`에 `0`이 아닌 값이 표시되면
+  - `job`이 data를 소비하고 있음을 확신할 수 있음
