@@ -227,3 +227,128 @@ val fileStream = spark.readStream
   - 처리하기에 유효한 파일이 임곗값보다 오래된 조건이 있을 수 있기 때문에
   - `maxfileAge`는 무시됨
 - 위 경우에 **에이징 정책**을 사용할 수 없음
+
+### 10.3.3. 일반적인 텍스트 파싱 옵션(CSV, JSON)
+- 구성 가능한 **파서**를 사용하여,
+  - 각 파일의 텍스트 데이터를 **구조화된 데이터**로 변환
+- `upstream process`가
+  - 예상되는 형식을 충족하지 않는 레코드를 작성하는 것도 가능
+  - 레코드는 **손상된 것**으로 간주
+- 잘못된 데이터가 수신될 때, 스트리밍 프로세스가 `실패하지 않아야 함`
+- 비즈니스 요구사항에 따라
+  - 잘못된 레코드를 삭제하거나
+  - 손상된 것으로 간주되는 데이터를, 별도의 오류 처리 흐름으로 라우팅 가능
+
+#### 파싱 오류 처리
+- 파서 동작을 구성하여 `손상된 것`으로 간주하는 레코드 처리 가능
+
+##### mode(default: `PERMISSIVE`)
+- parsing 중에 `손상된 레코드`가 처리되는 방식 제어
+- `PERMISSIVE`
+  - 손상된 레코드의 값이, 스키마에 있어야 하는 `columnNameOfCorruptRecord` 옵션으로 구성된 **특수 필드**에 삽입
+  - 다른 모든 필드는 `null`로 설정
+  - 필드가 존재하지 않으면, 레코드는 **삭제**됨
+    - `DROPMALFORED`와 동일 동작
+- `DROPMALFORMD`
+  - 손상된 레코드가 **삭제**됨
+- `FAILFAST`
+  - 손상된 레코드가 발견되면 **예외** 발생
+  - 에러의 전파로 **스트리밍 프로세스가 중단**
+  - 권장하지 않음
+
+##### columnNameOfCorruptRecord(default: "_corrupt_record")
+- 조작된 레코드의 문자열 값을 포함하는 **특수 필드의 구성 허용**
+- `spark.sql.columnNameOfCorruptRecord`를 설정하여 필드 구성 가능
+- `spark.sql.columnNameOfCorruptRecord`와 이 옵션이 모두 설정된 경우
+  - **이 옵션이 우선됨**
+
+#### 스키마 추론
+##### inferSchema(default: `false`)
+- 스키마 추론이 지원되지 않음
+- 스미카가 제공되는 것이 필수
+
+#### 날짜와 시간 형식
+##### dateFormat(default: `yyyy-MM-dd`)
+- `date`를 파싱하는데 사용되는 패턴 구성
+- `java.text.SimpleDateFormat`을 따름
+
+##### timestampFormat(default: `yyyy-MM-dd'T'HH:mm:ss.SSSXXX`)
+- `timestamp` 필드를 파싱하는데 사용되는 패턴 구성
+- `java.text.SimpleDateFormat`에 정의된 형식을 따름
+
+### 10.3.4. JSON 파일 소스 형식
+- `JSON`으로 인코딩된 텍스트 파일 사용 가능
+  - 파일의 **각 줄**은 유효한 `JSON`객체를 의미
+- 제공된 스키마를 제공하여 `JSON`을 파싱
+- 스키마를 따르지 않는 레코드는 **유효하지 않은 것으로 간주**
+- 유효하지 않은 레코드 처리시, 제어할 수 있는 몇가지 옵션 존재
+
+#### JSON 파싱 옵션
+- 기본적으로 `JSON file source`는
+  - `JSON Lines specification`을 따를 것으로 기대
+- 파일에 있는 각각의 `row`는
+  - 지정된 스키마를 준수하는 유효한 `JSON document`로 기대
+- 각 줄은 `\n`으로 구분되어야 하며,
+  - 후행 공백이 무시되므로, `\r\n`도 지원
+- 표준을 완전히 준수하지 않는 데이터를 처리하기 위해
+  - `JSON Parser`의 **허용 오차**를 조정할 수 있음
+- 손상된 것으로 간주되는 레코드를 처리하기 위해
+  - 동작을 변경할 수 있음
+
+##### allowComments(default: `false`)
+- `enabled`일 경우,
+  - 파일에서 `java/c++` 스타일의 주석이 허용되며, 해당 행은 무시됨
+    ```json
+    // java syntax comments
+    {"id":4, "name":"test"}
+    ``` 
+- `false`일 경우, `JSON 파일의 주석`은 `손상된 레코드`로 간주
+  - 모드 설정에 따라 처리
+
+##### allowNumericLeadingZeros(default: `false`)
+- `enabled` 상태인 경우
+  - `0`으로 시작되는 숫자가 허용됨
+- `false`일 경우
+  - 선행 `0`은 유효하지 숫자값으로 간주
+  - 손상된 것으로 간주. 모드 설정에 따라 처리
+
+##### allowSingleQuote(default: `true`)
+- `'`을 사용하여 필드 표시 가능
+- 사용 가능한 경우 `'`와 `"`가 모두 허용
+- 이 설정에 관계없이, 따옴표 문자는 중첩 불가능
+  - 값 내에 사용될때 `escape`되어야 함
+
+##### allowUnquotedFiledNames(default: `false`)
+- 따옴표 없는 `JSON field name`을 허용
+- 이 옵션을 사용할 경우
+  - 필드 이름에 **공백**은 불가
+
+##### multiLine(default: `false`)
+- `enabled` 상태인 경우
+  - `JSON row`를 파싱하는 대신
+  - 각 파일의 **콘텐츠**를 하나의 유효한 `JSON document`로 간주
+  - 해당 스키마에 따라 **레코드**로 파싱
+- 파일의 생산자가 완전한 `JSON document` 파일로 출력할 수 있는 경우
+  - 이 옵션을 사용하도록 하기
+- 이 경우, 레코드를 그룹화 하기 위해 **최상위 배열** 사용
+- 예시
+  ```json
+  [
+    {"firstname":"Alice", "last name": "Wonderland"},
+    {"firstname":"Caraline", "last name": "Spin"}
+  ]
+  ```
+
+##### primitiveAsString(default: `false`)
+- `enabled` 상태인 경우
+  - 기본값 유형은 **문자열**로 간주
+- 이를 통해 **혼합 유형의 필드**가 있는 `document`를 읽을 수 있지만
+  - 모든 값을 `String`으로 읽음
+- 예시
+  ```json
+  [
+    // `15`와 `unknown` 모두 `String` 유형
+    {"firstname":"Alice", "last name": "Wonderland", "age":15},
+    {"firstname":"Caraline", "last name": "Spin", "age": "unknown"}
+  ]
+  ```
