@@ -352,3 +352,94 @@ val fileStream = spark.readStream
     {"firstname":"Caraline", "last name": "Spin", "age": "unknown"}
   ]
   ```
+
+### 10.3.5. CSV 파일 소스 형식
+- `CSV`는 값이 `,`로 구분되어 있음을 나타내지만
+  - 종종 **분리 문자**를 자유롭게 지정 가능
+- 데이터가 **일반 텍스트**에서
+  - **구조화된 레코드**로 변환되는 방식을 제어하는 데
+  - 사용할 수 있는 **많은 구성 옵션**이 있음
+- 서식 관련 옵션에 대해서는 **최신 문서**를 살펴 볼 것
+
+#### CSV 파싱 옵션
+
+##### comment(default: `""`)
+- **주석**으로 간주되는 줄을 표시하는 문자 구성
+- `option("comment", "#")`을 사용하면
+  - `#`로 시작하는 주석을 포함하여 파싱 가능
+
+##### header(default: `false`)
+- 스키마가 제공되어야 할 경우 **헤더 행은 무시**되며 효과가 없음
+
+##### multiline(default: `false`)
+- 각 파일의 모든 행에 걸쳐있는 **하나의 레코드**로 간주
+
+##### quote(default: `"`)
+- **열 구분 기호**를 포함하는 값을 묶는데 사용하는 문자
+
+##### sep(default: `,`)
+- 각 행의 필드를 구분하는 문자 구성
+
+### 10.3.6. parquet 파일 소스 형식
+- `apache parquet`은 **컬럼 지향적**인 **파일 기반 데이터 저장 형식**
+- **내부 표현**은
+  - 원본 행을 **압축 기술**을 사용하여 **저장된 열 청크**로 나눔
+- 결과적으로 **특정 열**이 필요한 쿼리는
+  - 전체 파일을 읽을 필요 없으며,
+  - 관련 부분을 **독립적**으로 처리 및 검색 가능
+- `parquet`은 복잡한 중첩 데이터 구조를 지원하고
+  - **데이터의 스키마 구조**를 유지
+- **향상된 쿼리 기능**, 스토리지 공간의 효율적인 사용 및
+  - 스키마 정보의 보존으로 인해 **parquet**은 크고 복잡한 데이터셋을 저장하는 데 널리 사용하는 형식
+
+#### 스키마 정의
+- `parquet` 파일에서 **스트리밍 소스**를 작성하려면
+  - **데이터 스키마** 및 **디렉터리 위치**를 제공하는 것으로 충분
+- 스트리밍 선언 중에 제공되는 스키마는 **스트리밍 소스 정의 기간**동안 고정
+  
+##### CODE.10.4. parquet 소스 예제 구축하기
+  ```scala
+  // 형식과 로드 경로 사용
+  val fileStream = spark.readStream
+      .schema(schema)
+      .parquet("hdfs://data/folder")
+  ```
+
+### 10.3.7. 텍스트 파일 소스 형식
+- **구성 옵션**을 사용하면
+  - 텍스트를 **한 줄씩** 또는
+  - 전체 파일을 **단일 텍스트 blob**으로 수집 가능
+- 이 소스에서 생성된 데이터의 스키마는 `StringType`
+
+#### 텍스트 흡수 옵션
+- 전체 텍스트 옵션을 사용하여 텍스트 파일을 **전체적으로 읽을 수 있도록** 지원
+
+##### wholetext(default: `false`)
+- `true`면 전체 파일을 `단일 텍스트 blob`으로 읽음
+- 그렇지 않으면 **표준 줄 구분 기호**(`\n, \r\n, \r`)을 사용하여
+  - 텍스트를 줄로 나누고, **각 줄을 레코드**로 간주
+
+#### text와 textFile
+- **텍스트 형식 사양**을 **종료 메서드 호출** 또는 **형식 옵션**으로 사용할 수 있음
+- **정적**으로 유형이 지정된 `dataset`을 얻으려면
+  - `StreamBuilder`의 마지막 호출로 `textFile`을 사용해야 함
+- 텍스트 형식은 두가지 API 대안을 지원
+
+##### text
+- `StringType` 형식의 단일 `value` 필드를 사용하여
+  - 동적으로 형식화된 `dataframe`을 반환
+
+##### textFile
+- 정적으로 타입이 지정된 `Dataset[String]`을 반환
+
+##### CODE.10.5. 텍스트 형식 API 사용법
+```scala
+// 형식으로 지정된 text
+val fileStream = spark.readStream.format("text").load("hdfs://data/folder")
+
+// 전용 메서드를 통해 지정된 text
+val fileStream = spark.readStream.text("hdfs://data/folder")
+
+// 전용 메서드를 통해 지정된 textFile
+val fileStream = spark.readStream.textFile("/tmp/data/stream")
+```
