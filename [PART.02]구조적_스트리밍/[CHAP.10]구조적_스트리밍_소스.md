@@ -443,3 +443,73 @@ val fileStream = spark.readStream.text("hdfs://data/folder")
 // 전용 메서드를 통해 지정된 textFile
 val fileStream = spark.readStream.textFile("/tmp/data/stream")
 ```
+
+## 10.4. 카프카 소스
+- **분산 로그**를 개념을 기반으로 하는 pub/sub(publish/subscribe) 시스템
+- kafka에서 조직 단위는 topic
+- 카프카의 **구조적 스트리밍 소스**는 `subscriber`역할을 구현하며,
+  - 하나 이상의 토픽에 게시된 데이터를 사용할 수 있음
+  - 이는 **신뢰할만한 소스**
+    - 스트리밍 프로세스의 **부분** 또는 **전체 실패** 및 **재시작**의 경우에도
+      - **데이터 전송 시멘틱**이 보장됨
+
+### 10.4.1. 카프카 소스 설정
+- `SparkSession`에서 `createStream` builder와 `format("kafka")` 메서드를 함께 사용 
+- 카프카에 연결하려면 **카프카 브로커**의 주소와
+  - 연결하려면 **토픽**이라는 **두 가지 필수 파라미터**가 필요
+- 카프카 브로커의 주소는
+  - `kafka.bootstrap.servers` 옵션을 통해 쉼표로 구분된 `host:post`쌍 목록을 포함하는 `String`으로 제공
+
+#### CODE.10.6. kafka 소스 생성하기
+```scala
+val kafkaStream = spark.readStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", "host1:port1,host2:port2,host3:port3")
+      .option("subscribe", "topic1")
+      .option("checkpointLocation", "hdfs://spark/streaming/checkpoint")
+      .load()
+
+// sql.DataFrame = [key: binary, value: binary, ...]
+```
+- `key, value, topic, partition, offset, timestamp, timestampType`
+  - 7개 필드가 있는 `DataFrame`
+- 이 스키마는 **카프카 소스**로 고정
+  - 카프카의 원시 `key, value` 및 사용된 **각 레코드의 메타데이터**를 제공
+- 일반적으로는 `key, value`에만 관심
+  - 모두 `ByteArray`로 표시되는 이전 `payload`를 포함
+- `StringSerializer`를 사용하여 카프카에 데이터를 쓰면
+  - 예제의 **마지막 표현식**에서와 같이 값을 `String`으로 캐스팅하여 해당 데이터를 다시 읽을 수 있음
+- **텍스트 기반 인코딩**은 일반적인 방법이나 데이터를 교환하는 가장 **공간 효율적**인 방법은 아님
+- 스키마 인식 `AVRO`형식과 같은 **다른 인코딩**은
+  - **스키마 정보 임베딩**의 추가 이점으로 인해 더 나은 공간 효율성을 제공할 수 있음
+- `topic, partition, offset`과 같은 메세지의 추가적인 **메타데이터**보다 복잡한 시나리오에서 사용 가능
+- 레코드를 생성한 `topic`이 포함되며 동시에
+  - 여러 토픽을 구독하는 경우 **레이블 또한 판별자**로 사용할 수 있음
+
+### 10.4.2. 토픽 구독 메서드 선택하기
+- 토픽을 지정하는 **세 가지 방법**
+  - subscribe
+  - subscribePattern
+  - assign
+- 위 옵션중에 **하나만** 포함되어야 함
+- 토픽과 **구독할 파티션**을 선택할 수 있는 **다양한 수준**의 **유연성**을 제공함
+
+#### subscribe
+- 단일 **토픽**또는 **쉼표**로 구분된 토픽 목록(`topic1, topic2, ..., topic n`)
+- 이 메서드는 각 **토픽**을 구독하고 
+  - 모든 **토픽**의 **통합 데이터**가 포함된 **단일 통합 스트림**을 작성
+- `.option("subscribe", "topic1, topic3")`
+
+#### subscribePattern
+- `subscribe` 동작과 유사하지만 **토픽**은 **정규 표현식** 패턴으로 지정
+- `.option("subscribePattern"), " factory[\\d]+Sensors")`
+
+#### assign
+- 토픽당 **특정 파티션**의 세부 스펙을 사용할 수 있음
+- `TopicPartition`으로 알려짐
+- 토픽당 파티션 `JSON`객체를 사용하여 표시되며,
+  - 각 키는 **토픽**이며 그 값은 **파티션 배열**
+- `.option("assign", """{"sensors": [0,1,3]}""")`
+  - 토픽 센서의 파티션 `0,1` 및 `3`을 구독
+- 이 방법을 사용하려면 **토픽 파티셔닝**에 대한 정보 필요
+- 카프카 API를 사용하거나 구성을 통해 프로그래밍적인 방식으로 **파티션 정보**를 얻을 수 있음
