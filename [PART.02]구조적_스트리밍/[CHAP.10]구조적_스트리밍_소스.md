@@ -512,4 +512,85 @@ val kafkaStream = spark.readStream
 - `.option("assign", """{"sensors": [0,1,3]}""")`
   - 토픽 센서의 파티션 `0,1` 및 `3`을 구독
 - 이 방법을 사용하려면 **토픽 파티셔닝**에 대한 정보 필요
-- 카프카 API를 사용하거나 구성을 통해 프로그래밍적인 방식으로 **파티션 정보**를 얻을 수 있음
+- 카프카 API를 사용하거나 구성을 통해 프로그래밍적인 방식으로 **파티션 정보**를 얻을 수 있음 
+
+### 10.4.3. 카프카 소스 옵션 구성
+- `전용 소스 구성` 및 기본 카프카 소비자에 직접적으로 제공하는 `pass-through` 옵션의 두가지 범주 존재
+
+#### 카프카 소스별 옵션
+- 카프카 소스의 동작 구성
+- 특히 `offest`이 소비되는 방식과 연관
+
+##### startingOffsets(default: `latest`)
+- `earliest`, `latest` 또는 해당 파티션 및 주어진 오프셋 간의 연관을 나타내는 `JSON` 객체
+- 실제 `offset`값은 항상 **양수**
+- 두 개의 **특수 오프셋**
+  - `-2`: `ealiest`
+  - `-1`: `latest`
+- 예시
+  ```bash
+  """{
+    "topic1":{"0":-1, "1": -2, "2": 1024}
+  }
+  """
+  ```
+- `startingOffsets`는 쿼리를 처음 **시작**할때만 사용
+- 이후의 모든 재시작에는, 저장된 `checkpoint`정보가 사용
+- 특정 오프셋에서 **스트리밍 작업**을 다시 시작하려면
+  - `checkpoint`의 내용을 제거해야 함
+
+##### failOnDataLoss(default: `true`)
+- 데이터가 손실될 수 있는 경우
+  - 스트리밍 쿼리 재시작에 **실패**하는지 여부를 나타냄
+- 일반적으로 `offset` 범위를 벗어났거나,
+  - 토픽이 **삭제**되었거나
+  - 토픽의 **균형**이 조정된 경우
+- 연속적인 생산자가 있는 `쿼리측`을 **중지/시작**하게 될 경우, 오류가 발생하기 때문에
+- `개발/테스트`주기 중에, 이 옵션을 `false`로 설정하는 것이 좋음
+- `운영`배포의 경우 이를 다시 `true`로 설정
+
+##### kafkaConsumer.pollTimeoutMs(default: `512`)
+- `spark Executor`에서 실행되는
+  - **분산 소비자**에서의 **카프카 데이터를 기다리는 폴링 시간 초**
+
+##### fetchOffset.numRetries(default: `3`)
+- 카프카 `offset` 패치에 실패하기 전 **재시도 횟수**
+
+##### fetchOffset.retryIntervalMs(default: `10`)
+- 오프셋 패치 재시도 간의 **지연 시간**
+
+##### maxOffsetsPerTrigger(default: X)
+- 각 쿼리 트리거에서 소비되는 **총 레코드 수**로
+  - **속도 제한**을 설정할 수 있음
+- 구성된 제한은 구독된 토픽의 **파티션 집합**에 균등하게 분배
+
+### 10.4.4. 카프카 소비자 옵션
+- 기본적인 카프카 소비자에 구성 옵션 전달
+- 설정하려는 구성 키에 `kafka.` 접두사를 추가하여 이를 수행
+  - e.g. `security.protocol`을 설정하기 위해 `kafka.security.porotocol`과 같이 전달
+
+#### CODE.10.7. 카프카 소스 TLS 구성 예제
+```scala
+val tlsKafkaSource = spark.readStream.format("kafka")
+  .option("kafka.bootstrap.servers", "host1:port1", "host2:port2")
+  .option("subscribe", "topsecret")
+  .option("kafka.security.protocol", "SSL")
+  .option("kafka.ssl.truststore.location", "/path/to/truststore.jks")
+  .option("kafka.ssl.truststore.password", "truststore-password")
+  .option("kafka.ssl.keystore.location", "/path/to/keystore.jks")
+  .option("kafka.ssl.keystore.password", "keystore-password")
+  .option("kafka.ssl.key.password", "password")
+  .load()
+```
+
+#### 금지된 구성 옵션
+- 소스의 `내부 프로세스와의 충돌`이 있기 때문에
+  - **소비자 구성**의 모든 옵션을 사용할 수 있는 것은 아님
+- 이들 중 하나를 사용하려고 하면 `IllegalArgumentException`이 발생
+- 옵션 목록
+  - `auto.offset.reset`: offset은 구조적 스트리밍 내에서 관리. `startingOffsets` 대신 사용
+  - `enable.auto.commit`: offset은 구조적 스트리밍 내에서 관리
+  - `group.id`: 고유한 group id는 **쿼리별**로 내부적 관리
+  - `key.deserializer`: payload는 항상 `Byte Array`. 특정 형식으로의 역직렬화하여 해결
+  - `value.deserializer`: payload는 항상 `Byte Array`. 특정 형식으로의 역직렬화하여 해결
+  - `interceptor.classes`: 소비자 인터셉터가 내부 데이터 표현을 손상할 수 있음
