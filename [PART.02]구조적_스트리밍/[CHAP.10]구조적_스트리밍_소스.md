@@ -594,3 +594,54 @@ val tlsKafkaSource = spark.readStream.format("kafka")
   - `key.deserializer`: payload는 항상 `Byte Array`. 특정 형식으로의 역직렬화하여 해결
   - `value.deserializer`: payload는 항상 `Byte Array`. 특정 형식으로의 역직렬화하여 해결
   - `interceptor.classes`: 소비자 인터셉터가 내부 데이터 표현을 손상할 수 있음
+
+
+## 10.5. 소켓 소스
+- `TCP`는
+  - C와 S간의 **양방향 통신**을 가능하게 하는 **연결 지향 프로토콜**
+- 소켓 소스는 `UTF-8`로 **인코딩**된
+  - **텍스트 기반 데이터 스트림**을 제공하는 `TCP`서버에 연결할 수 있는 `TCP 소켓 클라이언트`
+- 필수 옵션으로 제공되는 `host`, `port`를 사용하여 `TCP 서버`에 연결
+
+### 10.5.1. 구성
+- `TCP 서버`에 연결하려면 `호스트 주소`와 `포트 번호`가 필요함
+- 각 데이터 라인이 숫긴되는 **타임 스탬프**를 추가하도록 소켓 소스 구성도 가능
+
+#### 구성 옵션
+
+##### host(필수)
+- TCP 서버의 `DNS host | IP address`
+
+#### port(필수)
+- port number
+
+#### includeTimestamp(default: `false`)
+- `enabled` 상태가 되면 **소켓 소스**가
+  - 각 데이터 라인에 도착 타임스탬프를 추가
+- `timestamp`를 추가 필드로 추가하여
+  - **이 소스**에서 생성한 스키마를 변경
+
+#### CODE.10.8. 소켓 소스 예제
+- `includeTimestamp=true`
+  - 결과 스트리밍 `DataFrame`의 스키마는
+  - `value`와 `timestamp` 필드를 포함
+  - `value`는 `String`형식이고,
+    - `timestamp`는 `Timestamp` 형식
+- 코드
+  ```scala
+  // host와 port만 가능
+  val stream = spark.readStream
+      .format("socket")
+      .option("host", "localhost")
+      .option("port", 9876)
+      .load()
+
+  // timestamp 정보 추가
+  val stream = spark.readStream
+      .format("socket")
+      .option("host", "localhost")
+      .option("port", 9876)
+      .option("includeTimestamp", true)
+      .load()
+  
+  ```
