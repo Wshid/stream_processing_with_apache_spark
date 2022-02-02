@@ -110,3 +110,118 @@
   val timeStampEvents = raw.withColumn("timestamp", $"ts".cast(TimestampType))
                            .withWatermark("timestamp", "5 minutes")
   ```
+
+## 12.5. 시간 기반 윈도우 집계
+- 스트림 환경에서의 질문
+  - `x가 몇개나 있습니까?` - X
+  - `15분 간격으로 x가 몇개나 있는지` - O
+- **이벤트 시간 처리**를 사용하면
+  - **데이터 부분 집계**를 유지하고
+  - 선택된 **출력 모드**에 해당하는 의미를 사용하여
+  - **다운스트림 소비자**를 업데이트
+
+### 12.5.1. 시간 기반 윈도우 사용하기
+- `tumbling` 및 `sliding` 윈도우
+- `API 관점`에서 윈도우 집계는
+  - **윈도우 함수**를 **그룹화 기준**으로 사용하여 선언
+  - 이벤트 시간으로 사용하려는 필드에 **윈도우 함수**를 적용해야 함
+
+#### CODE.12.1. 전체 평균 계산
+```scala
+val perMinuteAvg = timeStampEvents
+  .withWatermark("timestamp", "5 minutes")
+  .groupBy(window($"timestamp", "1 minute"))
+  .agg(avg($"pressure"))
+
+perMinuteAvg.writestream.outputMode("append").format("console").start()
+```
+- 윈도우 집계의 결과
+  - 각 결과 윈도우의 `start, end timestamp`로 표시된 **윈도우 기간**이 포함되어 있음
+
+### 12.5.2. 간격이 어떻게 계산되는지에 대한 이해
+- 윈도우 간격은 사용한 시간 단위의 다음 **상위 시간 크기**에 해당하는
+  - `s/m/h/d`의 **시작에 연계**
+  - `e.g. window($"timestamp", "15 minutes")`
+  - 시간의 시작에 맞춰 `15min`의 간격을 생성
+- 첫 번째 간격의 **시작 시간**은
+  - 데이터 손실 없이 윈도우 정렬을 조정하기 위한 **과거 시간**
+  - 첫 번째 간격이 **일반적인 데이터 간격의 일부만 포함**할 수 있음을 의미
+- `e.g. 100 message/sec, 15min = 90K message, 첫 윈도우는 단순히 그 일부`
+- 윈도우의 **시작 간격**은
+  - 시작 시에 **수용적**이고, 종료 시에 **베타적**
+- **구간 표기법**(interval notation)에서
+  - `[start-time, end-time)`으로 기록됨
+
+
+### 12.5.3. 복합 집계키 사용
+
+#### CODE.12.2. 관측소당 평균 계산
+```scala
+val minuteAvgPerStation = timestampEvents
+    .withWatermark("timestamp", "5 minutes")
+    .groupBy($"stationId", window($"timestamp", "1 minute"))
+    .agg(avg($"pressure") as "pressureAvg", avg($"temp") as "tempAvg")
+
+minuteAvgPerStation.writeStream.outputMode("append").format("console").start
+```
+
+### 12.5.4. 텀블링 윈도우와 슬라이딩 윈도우
+- `window`
+  - `TimestampType` 타입의 `timeColumn`과
+  - 추가 파라미터를 사용하여 **윈도우의 기간**을 지정하는 SQL 함수
+- `window`의 시그니처
+  ```scala
+  window(timeColumn: Column,
+         windowDuration: String,
+         slideDuration: String,
+         startTime: String)
+  ```
+  - 이 메서드의 오버로드된 정의는 `slideDuration` 및 `startTime`을 선택적으로 생성
+- 이 `API`를 사용하면 **텀블링 윈도우**와 **슬라이딩 윈도우**라는 두 가지 유형의 윈도우 지정 가능
+
+#### 텀블링 윈도우
+- 시간을 겹치지 않는 **연속된 기간**으로 분할
+- `15분마다 총 카운트`
+- 오직 `windowDuration` 파라미터만 제공하여 **텀블링 윈도우**를 지정
+  ```scala
+  window($"timestamp", "5 minutes")
+  ```
+  - 5분마다 하나의 결과 생성
+
+#### 슬라이딩 윈도우
+- `텀블링 윈도우`와 달리 `슬라이딩 윈도우`는 시간 간격이 겹친다
+- 간격의 크기는 `windowDuration` 시간에 의해 결정
+- 해당 간격의 스트림에서 모든 값은 **집계 작업**에 고려
+- `slideDuration` 중에 도착하는 요소를 추가하고
+  - `가장 오래된 슬라이스`에 해당하는 요소를 제거한 다음
+  - 윈도우 내에 데이터에 집계를 적용하여
+  - 각 `slideDuration`에서 결과를 생성
+- 예시 코드
+  ```scala
+  window($"timestamp", "10 minutes", "1 minute")
+  ```
+  - `10분` 분량의 데이터를 사용하여 `1분`마다 결과를 생성
+- **텀블링 윈도우**는 `windowDuration`과 `slideDuration`의 값이 같은 슬라이딩 윈도우의 특별한 경우
+  ```scala
+  window($"timestamp", "5 minutes", "5 minutes")
+  ```
+- `windowDuration < slideInterval` - X
+  - `org.apache.spark.sql.AnalysisException` 발생
+
+#### 간격 오프셋
+- `startTime`이라는 세번째 파라미터는
+  - **윈도우 정렬**을 **오프셋**하는 방법 제공
+- **12.5.2** `간격이 어떻게 계산되는지에 대한 이해`에서
+  - 윈도우 간격이
+  - **상위 다음 시간 크기로 연계**되어 있음을 확인
+  - `startTime`을 사용하면, 표시된 시간만큼 **윈도우 간격을 오프셋**할 수 있음
+- 예시: 슬라이드 지속 시간이 `5분`인 `10분` window을 `2분씩 오프셋`하여 다음과 같은 시간 간격 생성
+  ```scala
+  // 00:02-00:12, 00:07-00:17, 00:12-00:22, ...
+  window($"timestamp", "10 minutes", "5minute", "2 minutes")
+  ```
+- `startTime < slideDuration` 이어야 함
+- 잘못된 구성이 제공되면 `org.apache.spark.sql.AnalysisException`이 발생
+- `slideDuration`이
+  - 윈도우가 보고되는 주기성을 제공한다는 점을 고려하면
+  - 우리는 **기간 자체보다 작은 시간 동안**만 그 기간 상쇄 가능
