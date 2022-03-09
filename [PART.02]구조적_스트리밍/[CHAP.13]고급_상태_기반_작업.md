@@ -71,3 +71,147 @@
 - 이 요구사항은 **카운터**나 기타 **뮤테이블 변수**(mutable variable)와 같은 **국소 상태**를
   - **함수에 본문에 포함시키지 않아야 한다**는 결과를 가지고 있음
 - 모든 **관리 상태**를 **상태 표시 클래스**에 **캡슐화**해야 함
+
+
+## 13.3. MapGroupsWithState의 사용
+- 슬라이딩 윈도우
+  - **시간 윈도우**를 기준으로 **이동 평균** 계산
+  - 윈도우에서 `찾은 요소 수와 상관 없이` 결과 생성
+- `마지막 10개 요소`의 **이동 평균**을 계산하기
+  - `필요한 요소 수`를 가져오는데 시간이 얼마나 걸릴지 모름
+  - 시간 윈도우를 사용할 수 없음
+  - 대신 `MapGroupsWithState`와 함께 **사용자 지정 상태**를 사용하여
+    - **자체 카운트 기반 윈도우** 정의 가능
+- 온라인 리소스 참조
+  - `map_groups_with_state` 노트북
+  - https://github.com/stream-processing-with-spark
+
+#### 스트리밍 데이터셋 초기화
+```scala
+// 기상 관측소 이벤트의 표현
+case class WeatherEvent(stationId: String,
+  timestamp: Timstamp,
+  location: (Double, Double),
+  pressure: Double,
+  temp: Double)
+
+val weatherEvents: Dataset[WeatherEvents] = ...
+```
+
+#### 상태 정의
+- 상태(`S`)를 정의
+- `최신 n개 요소를 유지`하고, 더 오래된 것을 삭제
+- Queue와 같은 `FIFO` 컬렉션 적용
+- 최신 요소가 **큐 앞**에 추가되고, 최신 `n`을 유지하고, 이전 요소를 삭제
+- 상태 정의는
+  - 사용을 용이하게 하는 몇 가지 **헬퍼 메서드**가 있는 **큐**가 지원하는 `FIFOBuffer`가 됨
+- 코드
+  ```scala
+  case class FIFOBuffer[T](
+    capacity: Int, data: Queue[T] = Queue.empty
+  ) extends Serializable {
+    def add(element: T): FIFOBuffer[T] = this.copy(data = data.enqueue(element).take(capacity))
+    def get: List[T] = data.toList
+    def size: Int = data.size
+  }
+  ```
+
+### 출력 유형 정의
+- 출력 유형(`O`) 정의
+- **상태 기반 연산**의 바람직한 결과는
+  - 입력 `WeatherEvent`에 있는 **센서값**의 **이동 평균**
+- 또한 연산에 사용된 값의 **시간 범위**를 알고 싶기 때문에
+  - 이를 기반으로 출력 유형 `WeatherEventAverage` 설계
+- 코드
+  ```scala
+  import java.sql.Timestamp
+  case class WeatherEventAverage(stationId: String,
+                                 startTime: Timestamp,
+                                 endTime: Timestamp,
+                                 pressureAvg: Double,
+                                 tempAvg: Double)
+  ```
+- 위와 같은 타입을 정의하면,
+  - **기존 상태**와 **새 요소**를 **결과**로 결합하는 `mappingFunction`을 계속 만들 수 있음
+
+#### CODE.13.1. 카운트 기반 이동 평균에 mapGroupsWithState 사용
+- `Groups` 랩퍼가 제공하는 함수를 통해 **내부 상태**를 업데이트 하는 역할도 수행
+- 상태를 `null`로 업데이트할 수 없음 => `IllegalArgumentException`이 발생
+- 상태를 **제거**하려면 `state.remove()` 메서드 활용
+- 코드
+  ```scala
+  def mappingFunction(
+    key: String,
+    values: Iterator[WeatherEvent],
+    state: GroupState[FIFOBuffer[WeatherEvent]]
+  ): WeatherEventAverage = {
+    // 윈도우의 크기
+    val ElementCountWindowSize = 10
+
+    // 현재 상태값을 받거나, 상태값이 존재하지 않는다면 새롭게 생성
+    val currentState = state.getOption
+      .getOrElse(
+        new FIFOBuffer[WeatherEvent](ElementCountWindowSize)
+    )
+    
+    // 새로운 이벤트가 발생하면, 상태값 변화
+    val updatedState = values.foldLeft(currentState) {
+      case (st, ev) => st.add(ev)
+    }
+
+    // 최신화된 상태로 상태값 갱신
+    state.update(updatedState)
+
+    // 데이터가 충분하면 상태에서 `WeatherEventAverage`를 생성하고
+    // 그렇지 않다면 `0`으로 기록
+    val data = updatedState.get
+    if (data.size > 2) {
+      val start = data.head
+      val end = data.last
+      val pressureAvg = data
+          .map(event => event.pressure)
+          .sum / data.size
+      val tempAvg = data
+          .map(event => event.temp)
+          .sum / data.size
+        WeatherEventAverage(
+          key,
+          start.timestamp,
+          end.timestamp,
+          pressureAvg,
+          tempAvg
+        )
+    } else {
+      WeatherEventAverage(
+        key,
+        new Timestamp(0),
+        new Timestamp(0),
+        0.0,
+        0.0
+      )
+    }
+  }
+  ```
+- 스트리밍 `Dataset`의 상태 기반 변환을 위해 `mappingFunction`을 사용
+  ```scala
+  val weatherEventsMovingAverage = weatherEvents
+      .groupByKey(record => record.stationId)
+      .mapGroupsWithState(GroupStateTimetout.ProcessingTimeTimeout)(mappingFunction)
+  ```
+  - 먼저 도메인의 주요 식별자로, `Group` 생성
+    - 이 예시에서는 `stationId`를 의미
+  - `groupByKey` 작업은 `[map|flatMap]GroupWithState` 작업의 **진입점**이 되는
+    - 중간 구조인 `KeyValueGroupedDataset`을 생성
+  - 매핑 기능 외에도 **타임아웃 유형** 제공 필요
+    - 이 유형은 `ProcessingTimeTimeout`이거나 `EventTimeTimeout`일 수 있음
+  - **상태 관리**를 위한 **이벤트 타임스탬프**에 의존하지 않기 때문에 `ProcessingTimeTimeout`을 선택
+
+### 쿼리 결과
+- 콘솔 싱크를 사용한 쿼리 결과 도출
+- 코드
+  ```scala
+  val outQuery = weatherEventsMovingAverage.writeStream
+      .format("console")
+      .outputMode("update")
+      .start()
+  ```
