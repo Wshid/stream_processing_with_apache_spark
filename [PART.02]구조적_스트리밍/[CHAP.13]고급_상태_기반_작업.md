@@ -215,3 +215,86 @@ val weatherEvents: Dataset[WeatherEvents] = ...
       .outputMode("update")
       .start()
   ```
+
+## 13.4. FlatMapGroupsWithState 사용
+- `mapGroupsWithState` 사용시의 맹점
+  - 스트림 처리를 시작하고, **이동 평균**을 계산하는 데 필요한 것으로 간주되는 모든 요소를 수집하기 전
+  - `mapGroupsWithState` 작업에서 `0`이 없는 값을 생성
+- `mapGroupsWithState`는 모든 **트리거 간격**에서 처리되는 각 **그룹**에 대해
+  - **단일 레코드**를 생성하기 위한 **상태 처리 기능**이 필요
+- 이는 각 **키**에 해당하는 **새로운 데이터**의 도착이
+  - 자연스럽게 상태를 갱신한다면 문제 x
+- 단, **상태 로직**이 결과를 생성하기 전 **이벤트가 발생해야 하는 경우**가 존재
+  - 현재 예제에서는 **그들의 대한 평균 계산 전 `n`개 요소가 필요**
+  - 다른 시나리오에서는 **단일 수신 이벤트**가 여러 **임시 상태**를 완료하여
+    - 둘 이상의 결과 생성 가능
+      - 예시: 단일 대중교통 목적지 도착시, `승객의 여행상태`가 업데이트 됨
+- `flatMapGroupsWithState`는 **상태 처리 함수**가 `0`개 이상의 요소를 포함할 수 있는
+  - 결과 이터레이터를 생성하는 `mapGroupsWithState`의 일반화
+
+### 온라인 예시
+- `mapgroupswithstate-n-moving-agerage` 노트북 참고
+
+#### CODE.13.2. 카운트 기반 이동 평균에 FlatMapGroupsWithState 사용
+- 결과 이터레이터를 반환하려면 **매핑 함수**를 업데이트 해야 함
+- 이터레이터는 `평균`을 계산할 충분한 값이 없을 때 원소를 `0`개 포함하고
+  - 그렇지 않을 경우 값을 포함
+```scala
+def flatMappingFunction(
+  key: String,
+  values: Iterator[WeatherEvent],
+  state: GroupState[FIFOBuffer[WeatherEvent]]
+): Iterator[WeatherEventAverage] = {
+  val ElementCountWindowSize = 10
+
+  // 현재 상태값을 받거나, 상태값이 존재하지 않는 다면 새롭게 생성
+  val currentState = state.getOption
+    .getOrElse(
+      new FIFOBuffer[WeatherEvent](ElementCountWindowSize)
+    )
+  
+  // 새로운 이벤트가 발생하면 상태값 변화
+  val updatedState = values.foldLeft(currentState) {
+    case (st, ev) => st.add(ev)
+  }
+
+  // 최신화된 상태로 상태값을 갱신
+  state.update(updatedState)
+
+  // 충분한 데이터가 있을 때만, 상태에서 WeatherEventAverage 생성
+  // 그 전까지는 empty 값을 결과로 반환
+  val data = updatedState.get
+  if (data.size == ElementCountWindowSize) {
+    val start = data.head
+    val end = data.last
+    val pressureAvg = data
+      .map(event => event.pressure)
+      .sum / data.size
+    val tempAvg = data
+      .map(event => event.temp)
+      .sum / data.size
+    
+    Iterator(
+      WeatherEventAverage(
+        key,
+        start.timestamp,
+        end.timestamp,
+        pressureAvg,
+        tempAvg
+      )
+    )
+  } else {
+    Iterator.empty
+  }
+
+  val weatherEventsMovingAverage = weatherEvents
+    .groupByKey(record => record.stationId)
+    .flatMapGroupsWithState(
+      OutputMode.Update,
+      GroupStateTimeout.ProcessingTimeTimeout
+    )(flatMappingFunction)
+}
+```
+- `flatMapGroupsWithState`를 사용하면, 더 이상 인공적인 제로 레코드 생성 필요 x
+- 또한, 상태 관리 정의는
+  - 결과를 생성하기 위해 `n`개 요소를 갖는 것에 엄격함
