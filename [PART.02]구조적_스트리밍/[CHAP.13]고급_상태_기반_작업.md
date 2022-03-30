@@ -298,3 +298,168 @@ def flatMappingFunction(
 - `flatMapGroupsWithState`를 사용하면, 더 이상 인공적인 제로 레코드 생성 필요 x
 - 또한, 상태 관리 정의는
   - 결과를 생성하기 위해 `n`개 요소를 갖는 것에 엄격함
+
+### 13.4.1. 출력 모드
+- `map`과 `flatMapGroupsWithState` 작업간 결과에서의 **카디널리티** 차이는
+  - 실제 `API 차이`와 거의 같지 않지만
+  - 더 큰 결과를 초래
+- `flatMapGroupsWithState`에는 **출력 모드**의 추가 사양이 필요
+  - **상태 기반 작업**의 **레코드 생산 의미**에 대한 정보를 **다운스트림 프로세스**에 제공하는 데 필요
+- 결과적으로 **구조적 스트리밍**은
+  - **다운스트림 싱크**에 대해 허용된 **출력 작업**을 계산하는데 도움이 됨
+
+#### flatMapGroupsWithState에 지정된 출력 모드
+- `update`
+  - 생성된 레코드가 **최종이 아님**
+  - 나중에 새로운 정보로 업데이트 될 수 있는 **중간 결과**
+  - 이전 예제에서, 키에 대한 새 데이터가 도착하면, 새 데이터 포인트 생성
+  - **다운 스트림 싱크**는 `update`를 사용해야 하며, 어떤 집계도 `flatMapGroupsWithState`작업을 따를 수 없음
+- `append`
+  - 그룹에 대한 결과를 생성하는 데 필요한 **모든 정보를 수집했으며**
+  - 들어오는 이벤트가 **해당 결과를 변경하지 않음**을 의미
+  - 다운스트림 싱크는 `append`모드를 사용하여 작성해야 함
+  - `flatMapGroupsWithState`를 적용하면
+    - 최종 레코드가 생성되므로, 해당 결과에 추가 집계를 적용할 수 있음
+
+### 13.4.2. 시간 경과에 따른 상태 관리
+- 시간 경과에 따른 **상태 관리**의 중요한 요건은
+  - 안정적인 **작업셋**(working set)을 확보하는 것
+- 공정에 의해 요구되는 **메모리**는
+  - 시간이 지남에 따라 **경계**를 이루며
+  - **변동**을 허용할 수 있도록 **가용 메모리 아래** 안전한 거리에 머무름
+- `CHAP.12`에서 보았던 **시간 기반 윈도우**와 같은 관리되는 상태 기반 집계에서
+  - **구조적 스트리밍**은 **사용되는 메모리양 제한**을 위해
+  - 내부적으로 **상태** 및 만료된 것으로 간주되는 **이벤트를 제거**하는 메커니즘 관리
+  - `map|flatMapGroupsWithState`에서 제공하는 **사용자 지정 상태 관리 기능**을 사용할 때
+    - 이전 상태를 제거하는 책임을 져야 함
+- 구조적 스트리밍은 **특정 상태의 만료 시기**를 결정하는데 사용할 수 있는
+  - **시간** 및 **타임아웃 정보**를 노출
+
+#### 만료시기 결정 첫번째 단계: 사용할 시간 기준 정하기
+- 타임아웃은 **이벤트 시간** 또는 **처리 시간**을 기준으로 함
+- 그 선택은 구성 중인 특정 `map|flatMapGroupsWithState`에 의해 처리되는 상태에 **전역적**
+- 타임아웃 유형은 `map|flatMapGroupsWithState`를 호출할 때 지정
+
+#### 처리시간을 기준으로 처리
+  ```scala
+  val weatherEventsMovingAverage = weatherEvents
+    .groupByKey(record => record.stationId)
+    .mapGroupsWithState(GroupStateTimeout.ProcessingTimeTimeout)(mappingFunction)
+  ```
+
+#### 이벤트 시간을 사용하기
+- 이벤트 시간을 사용하려면 **워터마크 정의** 필요
+- 이 정의는 이벤트의 **타임스탬프 필드**와 **워터마크**의 구성된 지연으로 이루어짐
+  ```scala
+  val weatherEventsMovingAverage = weatherEvents
+    .withWatermark("timestamp", "2 minutes")
+    .groupByKey(record => record.stationId)
+    .mapGroupsWithState(GroupStateTimeout.EventTimeTimeout)(mappingFunction)
+  ```
+
+#### 타임아웃 타입
+- 타임아웃 타입은 **시간 참조**의 **전역적인 소스** 선언
+- 타임아웃이 필요하지 않는 경우를 위한 `GroupStateTimeout.NoTimeout` 옵션도 존재
+- `Timeout`의 실젯값은 `GrouopState`에서 사용한 `state.setTimeoutDuration`또는
+  - `state.setTimeoutTimestamp` 메서드를 사용하여, 각 그룹별로 관리
+- 상태가 만료되었는지 확인하기 위해 `state.hasTimedOut`을 확인
+- 타임아웃 상태가 되면, 타임아웃된 그룹에 대한 **빈 값의 이터레이터**가 포함된
+  - `(flat)MapFunction`에 대한 호출이 발생
+- 타임아웃 기능 사용
+  - 상태를 이벤트로 변환하는 것 포함
+  ```scala
+  def stateToAverageEvent(
+    key: String,
+    data: FIFOBuffer[WeatherEvent]
+  ): Iterator[WeatherEventAverage] = {
+    if (data.size = ElementCountWindowSize) {
+      val events = data.get
+      val start = events.head
+      val end = events.last
+      val pressureAvg = events
+        .map(event => event.pressure)
+        .sum / data.size
+      val tempAvg = events
+        .map(event => event.temp)
+        .sum / data.size
+      Iterator(
+        WeatherEventAverage(
+          key,
+          start.timestamp,
+          end.timestamp,
+          pressureAvg,
+          tempAvg
+        )
+      )
+    } else {
+      Iterator.empty
+    }
+  }
+  ```
+- 데이터가 유입되는 일반적인 시나리오뿐 아니라,
+  - 타임아웃의 경우에도
+  - **상태를 변환**하기 위해 **새로운 추상화**를 사용할 수 있음
+
+#### CODE.13.3. flatMapGroupsWithState에서 타임아웃 사용
+```scala
+def flatMappingFunction(
+  key: String,
+  values: Iterator[WeatherEvent],
+  state: GroupState[FIFOBuffer[WeatherEvent]]
+): Iterator[WeatherEventAverage] = {
+  // 우선 상태에서 시간 초과 확인
+  if (state.hasTimedOut) {
+    // 상태값이 timeout이라면 값이 비어 있음
+    // 이 검증은 단지 요청을 설명하기 위한 것
+    assert(
+      values.isEmpty,
+      "When the state has a timeout, the values are empty"
+    )
+    val result = stateToAverageEvent(key, state.get)
+    // 시간 초과 상태(timeout) 제거
+    state.remove()
+    // 현재 상태를 출력 레코드로 변환한 결과를 내보냄
+    result
+  } else {
+    // 현재 상태값을 받거나 상태값이 존재하지 않는다면 새롭게 생성
+    val currentState = state.getOption.getOrElse(
+      new FIFOBuffer[WeatherEvent](ElementCountWindowSize)
+    )
+    // 새로운 이벤트 발생하면 상탯값을 변화시킴
+    val updatedState = values.foldLeft(currentState) {
+      case (st, ev) => st.add(ev)
+    }
+    // 최신화된 상태로 상태값 갱신
+    state.update(updatedState)
+    state.setTimeoutDuration("30 seconds")
+    // 충분한 데이터가 있을 때만 상태에서 WeatherEventAverage 생성
+    // 그 전까지는 empty 값을 결과로 반환
+    stateToAverageEvent(key, updatedState)
+  }
+}
+```
+
+#### 타임아웃이 실제로 시간 초과되는 경우
+- 구조적 스트리밍에서 **타임 아웃**의 의미는
+  - 시계가 **워터마크**를 지나기 전에 **이벤트**가 시간초과 되지 않도록 보장
+  - 이것은 우리의 **타임아웃 직관**에 따른 것이며
+  - 설정된 **만료 시간**전에는 타임아웃되지 않음
+- 타임아웃 시맨틱이 **일반적인 직관**에서 벗어난 곳은
+  - **만료 시간**이 지난 후, **타임아웃 이벤트가 실제로 발생할 때**
+- 현재 타임아웃 처리는 **새 데이터 수신**에 바인드
+  - 따라서 **잠시 침묵하고 처리할 새 트리거**를 생성하지 않는 스트림은, 타임아웃도 생성하지 않음
+- 현재 타임아웃 시맨틱은 **이벤트 측면**에서 정의
+- **타임아웃 이벤트**는 실제 타임아웃이 발생한 후
+  - 타임아웃 이베트가 `얼마나 오래 발생했는지`에 보증 없이, 상태가 만료된 후 **트리거**
+- 공식적으로 말하면 **타임아웃이 언제 발생할지에 대한 엄격한 상한은 없음**
+- 주의
+  - `사용 가능한 새 데이터가 없는 경우에도 타임아웃이 발생하도록 작업 진행 중`
+
+## 13.5. 요약
+- 구조적 스트리밍의 **임의 상태 기반 처리 API**
+- 생선된 이벤트 및 지원되는 출력 모드와 관련하여
+  - `maapGroupsWithState`와 `flatMapGroupsWithState`의 세부 사항과 차이점
+- 타임아웃 설정
+- 이 장에서 살펴본 API는
+  - 일반 `SQL`과 유사한 구성보다 사용하기 더 복잡하나,
+  - **스트리밍 사용 사례 개발**을 처리하기 위한 **임의의 상태 관리**를 구현할 수 있는 강력한 도구셋 제공
